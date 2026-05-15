@@ -19,3 +19,7 @@ stores/snapcraft/insider/*.snap
 stores/snapcraft/stable/*.snap
 font-size/node_modules/
 font-size/generate-css.js
+
+# HypeProof Studio: brand-asset backups (created by scripts/install-brand-assets.sh)
+*.codium-orig
+*.codium-orig.svg

@@ -288,4 +288,32 @@ elif [[ "${OS_NAME}" == "windows" ]]; then
   sed -i 's|Microsoft Corporation|VSCodium|' build/win32/code.iss
 fi
 
+# --- HypeProof Studio overrides --------------------------------------------
+# cwd here is vscodium-base/vscode/.
+# 1. Apply HPS product.json values after VSCodium's setpath calls above.
+# 2. Inject the bundled hypeproof-chat extension into extensions/.
+if [[ -n "${HPS_NAME_SHORT:-}" ]] && [[ -f "../../scripts/apply-product-overrides.sh" ]]; then
+  PRODUCT_JSON="product.json" bash "../../scripts/apply-product-overrides.sh"
+
+  # Inject built hypeproof-chat as built-in
+  HPS_EXT_BUILT="../../extensions/hypeproof-chat"
+  if [[ -d "${HPS_EXT_BUILT}/dist" && -d "${HPS_EXT_BUILT}/webview-ui/dist" ]]; then
+    echo "[HPS] injecting hypeproof-chat extension"
+    rm -rf extensions/hypeproof-chat
+    mkdir -p extensions/hypeproof-chat/webview-ui
+    cp    "${HPS_EXT_BUILT}/package.json"   extensions/hypeproof-chat/
+    cp -r "${HPS_EXT_BUILT}/dist"           extensions/hypeproof-chat/
+    cp -r "${HPS_EXT_BUILT}/media"          extensions/hypeproof-chat/
+    cp -r "${HPS_EXT_BUILT}/webview-ui/dist" extensions/hypeproof-chat/webview-ui/dist
+    # Note: we do NOT add to product.json.builtInExtensions. That list
+    # triggers a marketplace/GH download at build time (and fails when no
+    # release exists). An extension placed in extensions/ at build time is
+    # bundled automatically as a "built-in" — same mechanism vscode itself
+    # uses for git, npm, etc.
+  else
+    echo "[HPS] hypeproof-chat not pre-built — skipping injection" >&2
+  fi
+fi
+# ---------------------------------------------------------------------------
+
 cd ..
