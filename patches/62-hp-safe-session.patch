@@ -40,7 +40,7 @@ index ca9ad6d..ca044ac 100644
  	/**
  	 * Destroy a browser view instance
 diff --git a/src/vs/platform/browserView/electron-main/browserSession.ts b/src/vs/platform/browserView/electron-main/browserSession.ts
-index dc23d2e..2936c4f 100644
+index dc23d2e..1ee575c 100644
 --- a/src/vs/platform/browserView/electron-main/browserSession.ts
 +++ b/src/vs/platform/browserView/electron-main/browserSession.ts
 @@ -7,7 +7,7 @@ import { session } from 'electron';
@@ -119,7 +119,7 @@ index dc23d2e..2936c4f 100644
  		this._trust = new BrowserSessionTrust(this);
  		this.configure();
  		BrowserSession.knownSessions.add(electronSession);
-@@ -222,18 +259,68 @@ export class BrowserSession {
+@@ -222,18 +259,82 @@ export class BrowserSession {
  	 * Apply the permission policy and preload scripts to the session.
  	 */
  	private configure(): void {
@@ -184,8 +184,22 @@ index dc23d2e..2936c4f 100644
 +			if (!entry) {
 +				return false;
 +			}
-+			if (url.startsWith(entry)) {
-+				return true;
++			if (entry.includes('://')) {
++				// A URL entry matches only at an origin boundary. Plain string
++				// prefixing would let `https://ok.example.evil.com` and the
++				// userinfo form `https://ok.example@evil.com` through — both
++				// carry an attacker-controlled host.
++				let allowed: URL;
++				try {
++					allowed = new URL(entry);
++				} catch {
++					return false;
++				}
++				if (allowed.origin !== parsed.origin) {
++					return false;
++				}
++				const base = allowed.pathname.endsWith('/') ? allowed.pathname : `${allowed.pathname}/`;
++				return parsed.pathname === allowed.pathname || parsed.pathname.startsWith(base);
 +			}
 +			return parsed.hostname === entry || parsed.hostname.endsWith(`.${entry}`);
 +		});
