@@ -1,47 +1,97 @@
-# HypeProof Studio — allow the chat webview to request the microphone.
+# HypeProof Studio — let OUR chat webview request the microphone.
 #
-# THREE HUNKS, and the third is why v1 of this patch shipped a broken app.
+# v3. FIVE HUNKS ACROSS THREE FILES. v1 shipped a blank app; v2 fixed that but the
+# microphone stayed denied. Both failures are recorded here because the second one
+# is not obvious from the code.
 #
-# `pre/index.html` carries the SHA-256 of its own inline script inside its own CSP
-# meta tag (`script-src 'sha256-…'`). v1 edited a line INSIDE that script and left
-# the hash alone, so Chromium refused to execute it, the webview shell never built
-# its content iframe, and the chat and start pages came up BLANK. Codex caught it
-# on the artifact from build run 34616771276 and reported the exact Chromium error.
+# WHY v2 WAS NOT ENOUGH — measured, not reasoned. Codex drove the rebuilt artifact
+# from build run 34623231942 on a real Mac and read the actual frame policy chain:
 #
-# The hash here was not guessed. The calculation was first validated by
-# reproducing the stock hash from the unmodified file, and the resulting value for
-# the patched script matches the hash Chromium itself reported:
-#   before sha256-TaWGDzV7c9rUH2q/5ygOyYUHSyHIqBMYfucPh3lnKvU=
-#   after  sha256-F3cWHVJseSLSGcewJCgf4+lHqww+TPBT0lgjBiFyf7c=
+#   top workbench document          microphone allowed = TRUE
+#   outer workbench -> webview      allow="cross-origin-isolated; autoplay;
+#     iframe                          local-network-access; clipboard-read;
+#                                      clipboard-write"        <- NO microphone
+#   webview shell document          microphone allowed = FALSE, allowlist []
+#   inner shell -> content iframe   allow="... microphone;"    <- v2's hunk, present
+#   chat content document           microphone allowed = FALSE, allowlist []
+#   getUserMedia                    NotAllowedError: Permission denied
+#   Chromium                        "microphone is not allowed in this document"
 #
-# ORDER MATTERS: compute the hash from the script AFTER the allowRules edit, then
-# write it into the CSP meta. The meta tag sits outside the script element, so
-# writing it does not perturb the hash again — asserted when generating this patch.
+# Permissions Policy is delegated per level: an inner `allow` cannot re-grant what
+# the embedder never received. v2 patched one level too deep. That same measurement
+# is the evidence for the scoping below — an inner frame listing microphone while
+# its parent is denied ends up with an EMPTY allowlist, so the effective grant is
+# the intersection of the levels.
 #
-# ANY future edit inside that script invalidates this hash again and the symptom is
-# a blank webview with no obvious cause. scripts/check-webview-csp-hash.py exists to
-# make that a build failure instead of a silent ship.
+# THE FIVE HUNKS (no single one of them opens the microphone):
+#   1 pre/index.html      CSP meta — the hash of this file's own inline script
+#   2 pre/index.html      read the extensionId the shell was launched with
+#   3 pre/index.html      inner iframe: delegate microphone, scoped to that id
+#   4 webviewElement.ts   OUTER iframe: delegate microphone, scoped to the owning
+#                         extension — this is what v2 was missing
+#   5 app.ts              Electron 'media' permission for webview frames
+#   + the OS — not patchable; NSMicrophoneUsageDescription is already present
 #
-# GATES (the first two are in different files; either alone changes nothing):
-#   1 iframe Permissions-Policy   webview/browser/pre/index.html
-#   2 Electron permission handler code/electron-main/app.ts — 'media'
-#   3 the OS — not patchable; NSMicrophoneUsageDescription is already present
-# Measured: allowedPermissionsInCore ALREADY has 'media', so the workbench window
-# may use the microphone today. Only webview frames may not.
+# BLAST RADIUS — this is what changed from v2, read it before shipping. v2 keyed the
+# inner delegation on `options.allowScripts`, i.e. EVERY script-enabled webview in
+# the app. v3 keys BOTH levels on the owning extension id
+# ('hypeproof.hypeproof-chat'), so:
+#   - a webview belonging to any other extension gets upstream's allow list
+#   - a webview with no owning extension gets nothing
+#   - the future hypeproof-preview extension is out of scope by construction
+#     (it has a different id and would need its own deliberate change)
+# The id is available where it is read: `this.extension` is assigned from initInfo
+# before `_createElement` runs, and the shell receives `extensionId` in its query
+# string. Both were observed carrying 'hypeproof.hypeproof-chat' on the two frames
+# in the shipped artifact, so this is not an assumption about plumbing.
+# Residual: an extension that declared the same publisher.name would collide with
+# the built-in. It is strictly narrower than v2, not a capability boundary.
 #
-# WHICH GATE DENIES IS UNKNOWN. The inner frame is same-origin (allow-same-origin,
-# loaded from fake.html on the webview origin) and microphone's default allowlist
-# is 'self'; MDN does not state whether an allow attribute that omits a feature
-# disables it. So hunk 1 may be unnecessary and hunk 2 may be the load-bearing one.
-# Only a build settles it. Do not record this patch as "microphone works".
+# THE CSP HASH. `pre/index.html` carries the SHA-256 of its own inline script inside
+# its own CSP meta (`script-src 'sha256-…'`). v1 edited a line INSIDE that script and
+# left the hash alone, so Chromium refused to execute it, the shell never built its
+# content iframe, and the chat and start pages came up BLANK — with build success,
+# verify-branding pass and a normal artifact. Every edit in hunks 2 and 3 is inside
+# that script, so the hash moves again:
+#   v1/stock sha256-TaWGDzV7c9rUH2q/5ygOyYUHSyHIqBMYfucPh3lnKvU=
+#   v2       sha256-F3cWHVJseSLSGcewJCgf4+lHqww+TPBT0lgjBiFyf7c=
+#   v3       sha256-VQFZcn+4j5AR46C+MNBJ98l02nDWSQrtwWw+V6mBZmc=
 #
-# BLAST RADIUS — read before shipping. Hunk 1 is keyed on options.allowScripts, the
-# same trust level clipboard-read uses, because upstream webview options carry no
-# media flag. Every script-enabled webview may then REQUEST the microphone, subject
-# to the OS prompt. Narrowing that to one webview means plumbing a new webview
-# option through the options type and the serialising host.
+# The v3 value was not guessed. The method was validated by reproducing the stock
+# hash from the unmodified file first, and the repo's own gate
+# (scripts/check-webview-csp-hash.py, a separate code path) independently agrees
+# with it on the patched source. Its negative control was also run: the patched file
+# carrying the old hash fails that gate.
+#
+# ORDER MATTERS: compute the hash from the script AFTER the hunk 2 and 3 edits, then
+# write it into the CSP meta. The meta sits outside the script element so writing it
+# does not perturb the hash again — asserted while generating this patch.
+#
+# ANY future edit inside that script invalidates this hash and the symptom is a blank
+# webview with no visible cause. verify-branding.sh check 11 makes that a build
+# failure instead of a silent ship.
+#
+# STILL NOT CLAIMED BY THIS PATCH: that the microphone works. Hunks 3 and 4 must both
+# be present for the policy to reach the content document, and the OS prompt is after
+# that. Only a real-device run settles it (H-01).
 #
 # Generated from microsoft/vscode at 560a9dba96f9 (upstream/stable.json tag 1.116.0).
+--- a/src/vs/code/electron-main/app.ts
++++ b/src/vs/code/electron-main/app.ts
+@@ -194,6 +194,13 @@ export class CodeApplication extends Disposable {
+ 
+ 		const allowedPermissionsInWebview = new Set([
+ 			...alwaysAllowedPermissions,
++			// HypeProof: 'media' is Electron's camera/microphone/speaker permission.
++			// This alone grants nothing: the iframe Permissions-Policy must delegate
++			// microphone at BOTH levels (webviewElement.ts outer, pre/index.html inner)
++			// and the OS prompt still runs. allowedPermissionsInCore below already has
++			// 'media', which is why the workbench document measured true while every
++			// webview frame measured false.
++			'media',
+ 			'clipboard-read',
+ 			'clipboard-sanitized-write',
+ 			// TODO(deepak1556): Should be removed once migration is complete
 --- a/src/vs/workbench/contrib/webview/browser/pre/index.html
 +++ b/src/vs/workbench/contrib/webview/browser/pre/index.html
 @@ -5,7 +5,7 @@
@@ -49,30 +99,56 @@
  
  	<meta http-equiv="Content-Security-Policy"
 -		content="default-src 'none'; script-src 'sha256-TaWGDzV7c9rUH2q/5ygOyYUHSyHIqBMYfucPh3lnKvU=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
-+		content="default-src 'none'; script-src 'sha256-F3cWHVJseSLSGcewJCgf4+lHqww+TPBT0lgjBiFyf7c=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
++		content="default-src 'none'; script-src 'sha256-VQFZcn+4j5AR46C+MNBJ98l02nDWSQrtwWw+V6mBZmc=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
  
  	<!-- Disable pinch zooming -->
  	<meta name="viewport"
-@@ -1055,7 +1055,7 @@
+@@ -33,6 +33,10 @@
+ 		const ID = searchParams.get('id');
+ 		const webviewOrigin = searchParams.get('origin');
+ 		const onElectron = searchParams.get('platform') === 'electron';
++		// HypeProof: which extension owns this webview. The microphone
++		// delegation below is scoped to it — a shell launched for any other
++		// extension forwards the same allow list as upstream.
++		const hpsMicrophoneAllowed = searchParams.get('extensionId') === 'hypeproof.hypeproof-chat';
+ 		const disableServiceWorker = searchParams.has('disableServiceWorker');
+ 		const expectedWorkerVersion = parseInt(searchParams.get('swVersion'));
  
+@@ -1056,6 +1060,13 @@
  				const allowRules = ['cross-origin-isolated;', 'autoplay;', 'local-network-access;'];
  				if (!isFirefox && options.allowScripts) {
--					allowRules.push('clipboard-read;', 'clipboard-write;');
-+					allowRules.push('clipboard-read;', 'clipboard-write;', 'microphone;');
+ 					allowRules.push('clipboard-read;', 'clipboard-write;');
++					// HypeProof: the outer iframe must ALSO delegate microphone
++					// (webviewElement.ts) or this line grants nothing — measured on
++					// run 34623231942, where this list had microphone; and the
++					// content document still reported an empty allowlist.
++					if (hpsMicrophoneAllowed) {
++						allowRules.push('microphone;');
++					}
  				}
  				newFrame.setAttribute('allow', allowRules.join(' '));
  				// We should just be able to use srcdoc, but I wasn't
---- a/src/vs/code/electron-main/app.ts
-+++ b/src/vs/code/electron-main/app.ts
-@@ -194,6 +194,11 @@
+--- a/src/vs/workbench/contrib/webview/browser/webviewElement.ts
++++ b/src/vs/workbench/contrib/webview/browser/webviewElement.ts
+@@ -408,6 +408,21 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
+ 		if (!isFirefox) {
+ 			allowRules.push('clipboard-read', 'clipboard-write');
+ 		}
++		// HypeProof: delegate microphone to OUR extension's webviews only.
++		//
++		// Permissions Policy is delegated per level. Patching the inner
++		// shell->content iframe alone left the shell document itself denied, so
++		// the content frame reported an empty allowlist and getUserMedia threw
++		// NotAllowedError (measured on build run 34623231942).
++		//
++		// Keyed on the owning extension rather than on options.allowScripts: the
++		// latter is every script-enabled webview in the app. `extension` is
++		// assigned from initInfo before this runs, and the id reaching both of
++		// our frames was observed as 'hypeproof.hypeproof-chat' in the shipped
++		// iframe src. A webview with no owning extension gets nothing.
++		if (this.extension?.id.value.toLowerCase() === 'hypeproof.hypeproof-chat') {
++			allowRules.push('microphone');
++		}
+ 		element.setAttribute('allow', allowRules.join('; '));
  
- 		const allowedPermissionsInWebview = new Set([
- 			...alwaysAllowedPermissions,
-+			// HypeProof: 'media' is Electron's camera/microphone/speaker permission.
-+			// The iframe Permissions-Policy in webview/browser/pre/index.html must also
-+			// allow 'microphone' for a frame, and the OS prompt still runs, so this alone
-+			// grants nothing. allowedPermissionsInCore below already contains 'media'.
-+			'media',
- 			'clipboard-read',
- 			'clipboard-sanitized-write',
- 			// TODO(deepak1556): Should be removed once migration is complete
+ 		element.style.border = 'none';
