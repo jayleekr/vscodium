@@ -1,0 +1,70 @@
+# HypeProof Studio — allow the chat webview to request the microphone.
+#
+# WHY TWO HUNKS: a webview reaching getUserMedia passes three gates, and the first
+# two are in different files. Patching either one alone changes nothing observable.
+#
+#   Gate 1  iframe Permissions-Policy       webview/browser/pre/index.html
+#           Upstream builds the frame's `allow` attribute as
+#           ['cross-origin-isolated;','autoplay;','local-network-access;'] plus
+#           clipboard when scripts are allowed. No 'microphone' -> getUserMedia is
+#           refused before CSP is even consulted.
+#
+#   Gate 2  Electron main-process handler    code/electron-main/app.ts
+#           `allowedPermissionsInWebview` omits 'media' (Electron's string for
+#           camera/microphone/speakers). Note that `allowedPermissionsInCore`
+#           ALREADY contains 'media' — the workbench window may use the microphone
+#           today; only webview frames may not.
+#
+#   Gate 3  the OS        not patchable. macOS shows its own prompt. The app's
+#           Info.plist already carries NSMicrophoneUsageDescription.
+#
+# MEASURED 2026-09-10 on the shipped 0.1.51 bundle: the webview `allow` list
+# contains clipboard-read/clipboard-write and the string "microphone" appears zero
+# times, which is why no amount of extension-side code could open a microphone.
+#
+# BLAST RADIUS — read before shipping this. Gate 1 here is keyed on
+# `options.allowScripts`, the same trust level clipboard-read uses, because the
+# upstream webview options carry no media flag (only allowScripts, allowForms and
+# allowMultipleAPIAcquire exist). So after this patch EVERY script-enabled webview
+# in the app — including third-party extension webviews — may *request* the
+# microphone, and the user sees an OS prompt. It does not grant silent access.
+# Narrowing gate 1 to one webview would mean plumbing a new webview option through
+# the options type and the host that serialises it; that is a larger patch and is
+# the right follow-up if this blast radius is judged unacceptable for a product
+# used by minors.
+#
+# NOT VERIFIED: this patch has never been applied or built. The submodule source
+# tree is not checked out in the authoring worktree, so `git apply --check` was not
+# run. It was generated from microsoft/vscode at 560a9dba (upstream/stable.json tag
+# 1.116.0) rather than written by hand, so the context lines are exact for that
+# commit — but an upstream bump can still invalidate it.
+#
+# Whether a fourth gate exists (Chromium device enumeration, or an Electron
+# switch) can only be settled by a patched build. Do not record this patch as
+# "microphone works".
+--- a/src/vs/workbench/contrib/webview/browser/pre/index.html
++++ b/src/vs/workbench/contrib/webview/browser/pre/index.html
+@@ -1055,7 +1055,7 @@
+ 
+ 				const allowRules = ['cross-origin-isolated;', 'autoplay;', 'local-network-access;'];
+ 				if (!isFirefox && options.allowScripts) {
+-					allowRules.push('clipboard-read;', 'clipboard-write;');
++					allowRules.push('clipboard-read;', 'clipboard-write;', 'microphone;');
+ 				}
+ 				newFrame.setAttribute('allow', allowRules.join(' '));
+ 				// We should just be able to use srcdoc, but I wasn't
+--- a/src/vs/code/electron-main/app.ts
++++ b/src/vs/code/electron-main/app.ts
+@@ -194,6 +194,12 @@
+ 
+ 		const allowedPermissionsInWebview = new Set([
+ 			...alwaysAllowedPermissions,
++			// HypeProof: 'media' is Electron's camera/microphone/speaker permission.
++			// Gate 1 (the iframe Permissions-Policy in webview/browser/pre/index.html)
++			// still has to allow 'microphone' for a given frame, and the OS prompt still
++			// runs, so this alone grants nothing. See patches/user/ readme for why both
++			// hunks are required and what the blast radius is.
++			'media',
+ 			'clipboard-read',
+ 			'clipboard-sanitized-write',
+ 			// TODO(deepak1556): Should be removed once migration is complete
