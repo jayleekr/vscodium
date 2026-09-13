@@ -1,79 +1,80 @@
-# HypeProof Studio — let OUR chat webview request the microphone.
+# HypeProof Studio — let ONE webview request the microphone: our extension's chat view.
 #
-# v3. FIVE HUNKS ACROSS THREE FILES. v1 shipped a blank app; v2 fixed that but the
-# microphone stayed denied. Both failures are recorded here because the second one
-# is not obvious from the code.
+# v4. FIVE HUNKS ACROSS THREE FILES. Read the version history before editing; each
+# version fixed a real, measured failure and the third one was mine to own.
 #
-# WHY v2 WAS NOT ENOUGH — measured, not reasoned. Codex drove the rebuilt artifact
-# from build run 34623231942 on a real Mac and read the actual frame policy chain:
+#   v1  edited inside the inline script, left its CSP hash alone
+#         -> Chromium refused the script, chat and start pages came up BLANK,
+#            with build success, verify-branding pass and a normal artifact.
+#   v2  fixed the hash. Screens rendered, microphone still DENIED.
+#         -> measured chain (run 34623231942, real Mac):
+#              top workbench document        allowed = TRUE
+#              outer workbench -> webview    allow had no microphone
+#              webview shell document        FALSE, allowlist []
+#              inner shell -> content        allow HAD microphone;   (v2's hunk)
+#              chat content document         FALSE, allowlist []
+#              getUserMedia                  NotAllowedError
+#            Permissions Policy is delegated per level, so an inner allow cannot
+#            re-grant what the embedder never received. v2 patched one level too deep.
+#   v3  added the OUTER delegation, keyed on the owning extension id. IT WORKS:
+#         run 34631073535, real Mac -> outcome=granted, trackCount=1,
+#         trackReadyState=live, shell and content allowsFeature('microphone') true.
+#         BUT the scope claim in its header was WRONG. It said the preview surface
+#         was out of scope "by construction" because hypeproof-preview is a separate
+#         sprint. Today the preview webview is created INSIDE hypeproof-chat
+#         (previewProvider.ts:127, enableScripts: true), so it shares the extension
+#         id and v3 admitted it. Confirmed by measurement, not argument: the
+#         same-extension START PAGE also reported microphone policy true.
+#   v4  ANDs a second discriminator so the surface is one webview, not three.
 #
-#   top workbench document          microphone allowed = TRUE
-#   outer workbench -> webview      allow="cross-origin-isolated; autoplay;
-#     iframe                          local-network-access; clipboard-read;
-#                                      clipboard-write"        <- NO microphone
-#   webview shell document          microphone allowed = FALSE, allowlist []
-#   inner shell -> content iframe   allow="... microphone;"    <- v2's hunk, present
-#   chat content document           microphone allowed = FALSE, allowlist []
-#   getUserMedia                    NotAllowedError: Permission denied
-#   Chromium                        "microphone is not allowed in this document"
+# THE SURFACE. hypeproof-chat owns three script-enabled webviews:
 #
-# Permissions Policy is delegated per level: an inner `allow` cannot re-grant what
-# the embedder never received. v2 patched one level too deep. That same measurement
-# is the evidence for the scoping below — an inner frame listing microphone while
-# its parent is denied ends up with an EMPTY allowlist, so the effective grant is
-# the intersection of the levels.
+#   chatPanelProvider.ts:562   chat        webview VIEW    <- voice lives here only
+#   startPage.ts:50            start page  webview panel
+#   previewProvider.ts:127     preview     webview panel
 #
-# THE FIVE HUNKS (no single one of them opens the microphone):
-#   1 pre/index.html      CSP meta — the hash of this file's own inline script
-#   2 pre/index.html      read the extensionId the shell was launched with
-#   3 pre/index.html      inner iframe: delegate microphone, scoped to that id
-#   4 webviewElement.ts   OUTER iframe: delegate microphone, scoped to the owning
-#                         extension — this is what v2 was missing
-#   5 app.ts              Electron 'media' permission for webview frames
-#   + the OS — not patchable; NSMicrophoneUsageDescription is already present
+# v3 delegated to all three. v4 delegates to the chat view alone:
 #
-# BLAST RADIUS — this is what changed from v2, read it before shipping. v2 keyed the
-# inner delegation on `options.allowScripts`, i.e. EVERY script-enabled webview in
-# the app. v3 keys BOTH levels on the owning extension id
-# ('hypeproof.hypeproof-chat'), so:
-#   - a webview belonging to any other extension gets upstream's allow list
-#   - a webview with no owning extension gets nothing
-#   - the future hypeproof-preview extension is out of scope by construction
-#     (it has a different id and would need its own deliberate change)
-# The id is available where it is read: `this.extension` is assigned from initInfo
-# before `_createElement` runs, and the shell receives `extensionId` in its query
-# string. Both were observed carrying 'hypeproof.hypeproof-chat' on the two frames
-# in the shipped artifact, so this is not an assumption about plumbing.
-# Residual: an extension that declared the same publisher.name would collide with
-# the built-in. It is strictly narrower than v2, not a capability boundary.
+#   outer  webviewElement.ts   extension id AND options.purpose === 'webviewView'
+#   inner  pre/index.html      the same two values from the shell's query string
+#
+# Neither discriminator is guessed. `WebviewOptions.purpose` is declared at
+# webview.ts:97 in the pinned upstream (`WebviewContentPurpose.WebviewView =
+# 'webviewView'`) and is passed straight into `_createElement(options, …)`;
+# `_initElement` copies it into the shell's query string (`if (options.purpose)
+# params.purpose = options.purpose`), and the shipped artifact's captured iframe src
+# carries `purpose=webviewView` on the chat frame and omits it on the start page. A
+# const enum compiles to the bare string, so the literal comparison needs no import.
+#
+# Residual, stated plainly: an extension declaring the same publisher.name would
+# collide with the built-in, and any future webview VIEW added to this extension
+# would inherit the delegation. This is strictly narrower than v3, not a capability
+# boundary. Whether the chat view may request the microphone at all is a human
+# decision (H-08), not something this patch settles.
 #
 # THE CSP HASH. `pre/index.html` carries the SHA-256 of its own inline script inside
-# its own CSP meta (`script-src 'sha256-…'`). v1 edited a line INSIDE that script and
-# left the hash alone, so Chromium refused to execute it, the shell never built its
-# content iframe, and the chat and start pages came up BLANK — with build success,
-# verify-branding pass and a normal artifact. Every edit in hunks 2 and 3 is inside
-# that script, so the hash moves again:
-#   v1/stock sha256-TaWGDzV7c9rUH2q/5ygOyYUHSyHIqBMYfucPh3lnKvU=
-#   v2       sha256-F3cWHVJseSLSGcewJCgf4+lHqww+TPBT0lgjBiFyf7c=
-#   v3       sha256-VQFZcn+4j5AR46C+MNBJ98l02nDWSQrtwWw+V6mBZmc=
+# its own CSP meta. Hunks 2 and 3 edit inside that script, so the hash moves again:
+#   stock sha256-TaWGDzV7c9rUH2q/5ygOyYUHSyHIqBMYfucPh3lnKvU=
+#   v2    sha256-F3cWHVJseSLSGcewJCgf4+lHqww+TPBT0lgjBiFyf7c=
+#   v3    sha256-VQFZcn+4j5AR46C+MNBJ98l02nDWSQrtwWw+V6mBZmc=
+#   v4    sha256-QcHyzmP/gRJ3S2FZ9OKJAeMmN/qUuumD37tL4bNuyMc=
 #
-# The v3 value was not guessed. The method was validated by reproducing the stock
-# hash from the unmodified file first, and the repo's own gate
-# (scripts/check-webview-csp-hash.py, a separate code path) independently agrees
-# with it on the patched source. Its negative control was also run: the patched file
-# carrying the old hash fails that gate.
+# Not guessed: the method reproduces the stock hash from the unmodified file before
+# computing anything, and the consuming repo's own gate
+# (scripts/check-webview-csp-hash.py — a separate code path) agrees with the value on
+# the patched source.
 #
 # ORDER MATTERS: compute the hash from the script AFTER the hunk 2 and 3 edits, then
 # write it into the CSP meta. The meta sits outside the script element so writing it
-# does not perturb the hash again — asserted while generating this patch.
+# does not perturb the hash — asserted while generating this patch.
 #
-# ANY future edit inside that script invalidates this hash and the symptom is a blank
-# webview with no visible cause. verify-branding.sh check 11 makes that a build
+# ANY future edit inside that script invalidates this hash, and the symptom is a
+# blank webview with no visible cause. verify-branding.sh check 11 makes that a build
 # failure instead of a silent ship.
 #
-# STILL NOT CLAIMED BY THIS PATCH: that the microphone works. Hunks 3 and 4 must both
-# be present for the policy to reach the content document, and the OS prompt is after
-# that. Only a real-device run settles it (H-01).
+# NOT CLAIMED: audible output. Capture is verified; playback is still web-audio-only.
+# H-04 (a human granting the OS prompt after a delay) is NOT RUN — the 222ms resolve
+# observed on v3 is not a delayed-permission test.
 #
 # Generated from microsoft/vscode at 560a9dba96f9 (upstream/stable.json tag 1.116.0).
 --- a/src/vs/code/electron-main/app.ts
@@ -99,29 +100,31 @@
  
  	<meta http-equiv="Content-Security-Policy"
 -		content="default-src 'none'; script-src 'sha256-TaWGDzV7c9rUH2q/5ygOyYUHSyHIqBMYfucPh3lnKvU=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
-+		content="default-src 'none'; script-src 'sha256-VQFZcn+4j5AR46C+MNBJ98l02nDWSQrtwWw+V6mBZmc=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
++		content="default-src 'none'; script-src 'sha256-QcHyzmP/gRJ3S2FZ9OKJAeMmN/qUuumD37tL4bNuyMc=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
  
  	<!-- Disable pinch zooming -->
  	<meta name="viewport"
-@@ -33,6 +33,10 @@
+@@ -33,6 +33,13 @@
  		const ID = searchParams.get('id');
  		const webviewOrigin = searchParams.get('origin');
  		const onElectron = searchParams.get('platform') === 'electron';
-+		// HypeProof: which extension owns this webview. The microphone
-+		// delegation below is scoped to it — a shell launched for any other
-+		// extension forwards the same allow list as upstream.
-+		const hpsMicrophoneAllowed = searchParams.get('extensionId') === 'hypeproof.hypeproof-chat';
++		// HypeProof: microphone is delegated to ONE webview — the chat view of our
++		// own extension. Keyed on the extension id AND the purpose, because the
++		// extension also owns the start page and the preview panel; keying on the
++		// id alone admitted all three (measured: the start page reported microphone
++		// policy true). A shell launched for anything else forwards upstream's list.
++		const hpsMicrophoneAllowed = searchParams.get('extensionId') === 'hypeproof.hypeproof-chat'
++			&& searchParams.get('purpose') === 'webviewView';
  		const disableServiceWorker = searchParams.has('disableServiceWorker');
  		const expectedWorkerVersion = parseInt(searchParams.get('swVersion'));
  
-@@ -1056,6 +1060,13 @@
+@@ -1056,6 +1063,12 @@
  				const allowRules = ['cross-origin-isolated;', 'autoplay;', 'local-network-access;'];
  				if (!isFirefox && options.allowScripts) {
  					allowRules.push('clipboard-read;', 'clipboard-write;');
-+					// HypeProof: the outer iframe must ALSO delegate microphone
-+					// (webviewElement.ts) or this line grants nothing — measured on
-+					// run 34623231942, where this list had microphone; and the
-+					// content document still reported an empty allowlist.
++					// The outer iframe must ALSO delegate microphone (webviewElement.ts) or
++					// this grants nothing — measured on run 34623231942, where this list
++					// carried microphone; and the content document's allowlist was empty.
 +					if (hpsMicrophoneAllowed) {
 +						allowRules.push('microphone;');
 +					}
@@ -130,23 +133,27 @@
  				// We should just be able to use srcdoc, but I wasn't
 --- a/src/vs/workbench/contrib/webview/browser/webviewElement.ts
 +++ b/src/vs/workbench/contrib/webview/browser/webviewElement.ts
-@@ -408,6 +408,21 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
+@@ -408,6 +408,25 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
  		if (!isFirefox) {
  			allowRules.push('clipboard-read', 'clipboard-write');
  		}
-+		// HypeProof: delegate microphone to OUR extension's webviews only.
++		// HypeProof: delegate microphone to ONE webview — our extension's chat view.
 +		//
-+		// Permissions Policy is delegated per level. Patching the inner
-+		// shell->content iframe alone left the shell document itself denied, so
-+		// the content frame reported an empty allowlist and getUserMedia threw
-+		// NotAllowedError (measured on build run 34623231942).
++		// Permissions Policy is delegated per level, so patching only the inner
++		// shell->content iframe left the shell document itself denied and
++		// getUserMedia threw NotAllowedError (measured, run 34623231942). Adding
++		// this line made it resolve with a live track (run 34631073535).
 +		//
-+		// Keyed on the owning extension rather than on options.allowScripts: the
-+		// latter is every script-enabled webview in the app. `extension` is
-+		// assigned from initInfo before this runs, and the id reaching both of
-+		// our frames was observed as 'hypeproof.hypeproof-chat' in the shipped
-+		// iframe src. A webview with no owning extension gets nothing.
-+		if (this.extension?.id.value.toLowerCase() === 'hypeproof.hypeproof-chat') {
++		// TWO discriminators, ANDed. The extension id alone was not enough: this
++		// extension also owns the start page and the preview panel, and the start
++		// page was measured reporting microphone policy true. `purpose` narrows it
++		// to the chat view, which is where voice lives and where capture was
++		// verified. Both values are available here — `extension` is assigned from
++		// initInfo before this runs, and `purpose` is a declared WebviewOptions
++		// field (const enum, so the literal comparison needs no import).
++		// A webview with no owning extension, or any other purpose, gets nothing.
++		if (this.extension?.id.value.toLowerCase() === 'hypeproof.hypeproof-chat'
++			&& options.purpose === 'webviewView') {
 +			allowRules.push('microphone');
 +		}
  		element.setAttribute('allow', allowRules.join('; '));
